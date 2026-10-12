@@ -1,0 +1,6 @@
+{
+  "name": "Blank Canvas Studio",
+  "description": "An immaculate starter workspace and clean slate for your next application.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
