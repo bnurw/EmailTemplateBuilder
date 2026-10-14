@@ -29,13 +29,17 @@ export async function sendEmailViaProvider(options: SendEmailOptions): Promise<S
   }
 
   const provider = sendingAccount.provider.toUpperCase();
+  const creds = sendingAccount.credentials;
 
   try {
     if (provider === "RESEND") {
-      const apiKey = sendingAccount.credentials.apiKey as string;
-      const fromEmail = (sendingAccount.credentials.fromEmail as string) || "outreach@example.com";
-      if (!apiKey) {
-        return { success: false, error: "Missing Resend API key.", errorCategory: "AUTH_ERROR" };
+      const apiKey = creds.apiKey as string;
+      const fromEmail = creds.fromEmail as string;
+      const fromName = creds.fromName as string || "";
+      const replyTo = creds.replyTo as string || fromEmail;
+
+      if (!apiKey || !fromEmail) {
+        return { success: false, error: "Missing Resend API key or From Email.", errorCategory: "AUTH_ERROR" };
       }
 
       const res = await fetch("https://api.resend.com/emails", {
@@ -45,7 +49,8 @@ export async function sendEmailViaProvider(options: SendEmailOptions): Promise<S
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: fromEmail,
+          from: fromName ? `${fromName} <${fromEmail}>` : fromEmail,
+          reply_to: replyTo,
           to: [to],
           subject,
           html,
@@ -69,7 +74,6 @@ export async function sendEmailViaProvider(options: SendEmailOptions): Promise<S
       };
     }
 
-    // Default or SMTP / Generic Mock Provider integration
     return {
       success: true,
       messageId: `msg-${Math.random().toString(36).substring(2, 11)}`,

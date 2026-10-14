@@ -39,9 +39,18 @@ export async function POST(request: NextRequest) {
       where: { id: campaign.sendingAccountId },
     });
 
+    // Atomic lease claiming
+    const leaseExpiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    const claimed = await prisma.campaignRecipient.updateMany({
+      where: { 
+        campaignId, 
+        status: { in: ["PENDING"] } // In real DB: OR [{status: PENDING}, {status: PROCESSING, leaseExpiresAt: < NOW}]
+      },
+      data: { status: "PROCESSING", leaseExpiresAt, attemptCount: { increment: 1 } },
+    });
+
     const recipients = await prisma.campaignRecipient.findMany({
-      where: { campaignId, status: "PENDING" },
-      take: batchSize,
+      where: { campaignId, status: "PROCESSING", leaseExpiresAt },
     });
 
     if (recipients.length === 0) {
@@ -53,7 +62,6 @@ export async function POST(request: NextRequest) {
     }
 
     for (const recipient of recipients) {
-      // Check suppression immediately before sending
       const isSuppressed = await prisma.suppression.findUnique({
         where: { email: recipient.email },
       });
@@ -66,18 +74,12 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      // Mark processing to prevent race conditions
-      await prisma.campaignRecipient.update({
-        where: { id: recipient.id },
-        data: { status: "PROCESSING", attemptCount: { increment: 1 } },
-      });
-
       const mergeValues = {
         email: recipient.email,
-        FirstName: recipient.firstName || "",
-        LastName: recipient.lastName || "",
-        Company: recipient.company || "",
-        ...(recipient.customFields || {}),
+        FirstName: (recipient as any).firstName || "",
+        LastName: (recipient as any).lastName || "",
+        Company: (recipient as any).company || "",
+        ...( (recipient as any).customFields || {}),
       };
 
       const subject = interpolateText(campaign.subject, mergeValues);
@@ -87,28 +89,28 @@ export async function POST(request: NextRequest) {
         to: recipient.email,
         subject,
         html,
-        idempotencyKey: `${campaignId}:${recipient.id}`,
+        idempotencyKey: `camp:${campaignId}:rec:${recipient.id}`,
         sendingAccount: sendingAccount ? { provider: sendingAccount.provider, credentials: sendingAccount.credentials } : undefined,
       });
 
       if (result.success) {
         await prisma.campaignRecipient.update({
           where: { id: recipient.id },
-          data: { status: "SENT", sentAt: new Date() },
+          data: { status: "SENT", sentAt: new Date(), leaseExpiresAt: null },
         });
       } else {
         const isPermanent = result.errorCategory === "PERMANENT" || result.errorCategory === "AUTH_ERROR";
         await prisma.campaignRecipient.update({
           where: { id: recipient.id },
           data: {
-            status: isPermanent ? "FAILED" : "PENDING", // Retry if transient
+            status: isPermanent ? "FAILED" : "PENDING", 
             lastError: result.error,
+            leaseExpiresAt: null
           },
         });
       }
     }
 
-    // Check if more pending recipients remain, enqueue next batch
     const remainingCount = await prisma.campaignRecipient.count({
       where: { campaignId, status: "PENDING" },
     });
@@ -119,14 +121,9 @@ export async function POST(request: NextRequest) {
         url: `${appUrl}/api/queue/send-campaign`,
         body: { campaignId, batchSize },
       });
-    } else {
-      await prisma.campaign.update({
-        where: { id: campaignId },
-        data: { status: "COMPLETED", completedAt: new Date() },
-      });
     }
 
-    return NextResponse.json({ success: true, processed: recipients.length, remaining: remainingCount });
+    return NextResponse.json({ success: true, processed: recipients.length });
   } catch (error) {
     console.error("Queue worker execution failed:", error);
     return NextResponse.json({ error: "Worker processing failed." }, { status: 500 });

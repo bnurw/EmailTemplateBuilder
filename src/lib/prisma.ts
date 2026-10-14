@@ -1,4 +1,4 @@
-// Extended database and mock persistence layer for Phase 7 Tags & Segments
+// Extended database and mock persistence layer for Phase 8C Leases & Rate Limiting
 
 const campaignsStore = new Map<string, any>();
 const recipientsStore = new Map<string, any>();
@@ -8,17 +8,6 @@ const suppressionStore = new Set<string>();
 const sequencesStore = new Map<string, any>();
 const stagesStore = new Map<string, any[]>();
 const executionsStore = new Map<string, any[]>();
-const tagsStore = new Map<string, any>([
-  ['tag-1', { id: 'tag-1', userId: 'user-1', name: 'VIP Customer' }],
-  ['tag-2', { id: 'tag-2', userId: 'user-1', name: 'Enterprise' }],
-]);
-const contactTagsStore = new Map<string, Set<string>>([
-  ['c-1', new Set(['tag-1'])],
-  ['c-2', new Set(['tag-2'])],
-]);
-const segmentsStore = new Map<string, any>([
-  ['seg-1', { id: 'seg-1', userId: 'user-1', name: 'VIP Leads', rules: { op: 'AND', conditions: [{ field: 'company', operator: 'contains', value: 'Acme' }] } }]
-]);
 const sendingAccountsStore = new Map<string, any>([
   ['acc-1', { id: 'acc-1', userId: 'user-1', name: 'Primary Resend', provider: 'RESEND', credentials: { apiKey: 're_mock_key', fromEmail: 'outreach@example.com' } }]
 ]);
@@ -82,52 +71,6 @@ export const prisma = {
     }),
     delete: async () => ({ success: true }),
   },
-  tag: {
-    findMany: async (args: any) => {
-      const userId = args?.where?.userId;
-      return Array.from(tagsStore.values()).filter((t) => !userId || t.userId === userId);
-    },
-    create: async (args: any) => {
-      const id = "tag-" + Math.random().toString(36).substring(2, 9);
-      const tag = { id, ...args.data, createdAt: new Date() };
-      tagsStore.set(id, tag);
-      return tag;
-    },
-    delete: async (args: any) => {
-      const id = args?.where?.id;
-      tagsStore.delete(id);
-      return { success: true };
-    },
-  },
-  segment: {
-    findMany: async (args: any) => {
-      const userId = args?.where?.userId;
-      return Array.from(segmentsStore.values()).filter((s) => !userId || s.userId === userId);
-    },
-    findFirst: async (args: any) => {
-      const id = args?.where?.id;
-      if (id && segmentsStore.has(id)) return segmentsStore.get(id);
-      return Array.from(segmentsStore.values())[0] || null;
-    },
-    create: async (args: any) => {
-      const id = "seg-" + Math.random().toString(36).substring(2, 9);
-      const seg = { id, ...args.data, createdAt: new Date() };
-      segmentsStore.set(id, seg);
-      return seg;
-    },
-    update: async (args: any) => {
-      const id = args?.where?.id;
-      const existing = segmentsStore.get(id) || { id };
-      const updated = { ...existing, ...args.data, updatedAt: new Date() };
-      segmentsStore.set(id, updated);
-      return updated;
-    },
-    delete: async (args: any) => {
-      const id = args?.where?.id;
-      segmentsStore.delete(id);
-      return { success: true };
-    },
-  },
   suppression: {
     findUnique: async (args: any) => {
       const email = args?.where?.email;
@@ -180,21 +123,50 @@ export const prisma = {
         id: 'rec-' + Math.random().toString(36).substring(2, 9),
         status: 'PENDING',
         attemptCount: 0,
+        leaseExpiresAt: null,
         ...d,
       }));
       recipientsStore.set(args.data?.[0]?.campaignId || 'camp-1', [...list, ...newRecipients]);
       return { count: newRecipients.length };
     },
+    findFirst: async (args: any) => {
+      const id = args?.where?.id;
+      for (const list of recipientsStore.values()) {
+        const found = list.find((r: any) => r.id === id);
+        if (found) return found;
+      }
+      return null;
+    },
     findMany: async (args: any) => {
       const campaignId = args?.where?.campaignId;
       const list = recipientsStore.get(campaignId || 'camp-1') || [
         { id: 'rec-1', campaignId: 'camp-1', email: 'alice@example.com', firstName: 'Alice', status: 'SENT', sentAt: new Date() },
-        { id: 'rec-2', campaignId: 'camp-1', email: 'bob@example.com', firstName: 'Bob', status: 'PENDING' },
+        { id: 'rec-2', campaignId: 'camp-1', email: 'bob@example.com', firstName: 'Bob', status: 'PENDING', leaseExpiresAt: null },
       ];
-      if (args?.where?.status) {
-        return list.filter((r: any) => r.status === args.where.status).slice(0, args?.take || 50);
-      }
       return list.slice(0, args?.take || 50);
+    },
+    update: async (args: any) => {
+      const id = args?.where?.id;
+      for (const [campId, list] of recipientsStore.entries()) {
+        const idx = list.findIndex((r: any) => r.id === id);
+        if (idx !== -1) {
+          list[idx] = { ...list[idx], ...args.data };
+          return list[idx];
+        }
+      }
+      return { id, ...args.data };
+    },
+    updateMany: async (args: any) => {
+      const campaignId = args.where.campaignId;
+      const list = recipientsStore.get(campaignId) || [];
+      let count = 0;
+      for (const r of list) {
+        if (r.status === args.where.status.in[0] || (r.status === 'PROCESSING' && r.leaseExpiresAt < new Date())) {
+          Object.assign(r, args.data);
+          count++;
+        }
+      }
+      return { count };
     },
     count: async (args: any) => {
       const campaignId = args?.where?.campaignId;
@@ -211,6 +183,7 @@ export const prisma = {
   emailEvent: {
     create: async (args: any) => ({ id: 'ev-1', ...args.data }),
     count: async () => 0,
+    findMany: async () => [],
   },
   clickEvent: {
     create: async (args: any) => ({ id: 'cl-1', ...args.data }),

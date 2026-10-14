@@ -1,12 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { createHmac } from "crypto";
 
 export const runtime = "nodejs";
 
+const WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET || "fallback_secret";
+
+async function verifyResendSignature(request: NextRequest, body: string) {
+  const signature = request.headers.get("webhook-signature");
+  if (!signature) return false;
+
+  const hmac = createHmac("sha256", WEBHOOK_SECRET);
+  hmac.update(body);
+  const digest = hmac.digest("hex");
+  return signature === digest;
+}
+
 export async function POST(request: NextRequest) {
+  const rawBody = await request.text();
+
+  if (!(await verifyResendSignature(request, rawBody))) {
+    return NextResponse.json({ error: "Invalid webhook signature." }, { status: 401 });
+  }
+
   let body: any;
   try {
-    body = await request.json();
+    body = JSON.parse(rawBody);
   } catch {
     return NextResponse.json({ error: "Invalid JSON." }, { status: 400 });
   }
@@ -20,6 +39,15 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    // Check if event already processed (idempotency)
+    const existing = await prisma.emailEvent.findMany({
+      where: { messageId: messageId || "unknown", type: eventType },
+    });
+
+    if (existing.length > 0) {
+      return NextResponse.json({ success: true, message: "Duplicate event skipped." });
+    }
+
     if (eventType === "email.delivered") {
       await prisma.emailEvent.create({
         data: { campaignId: "camp-1", type: "DELIVERED", messageId: messageId || "unknown" },
@@ -28,10 +56,22 @@ export async function POST(request: NextRequest) {
       await prisma.emailEvent.create({
         data: { campaignId: "camp-1", type: "BOUNCED", messageId: messageId || "unknown" },
       });
+      // Automatically suppress bounced addresses
+      if (data?.email) {
+        await prisma.suppression.create({
+          data: { email: data.email, reason: 'BOUNCED' },
+        });
+      }
     } else if (eventType === "email.complained") {
       await prisma.emailEvent.create({
         data: { campaignId: "camp-1", type: "COMPLAINT", messageId: messageId || "unknown" },
       });
+      // Automatically suppress complained addresses
+      if (data?.email) {
+        await prisma.suppression.create({
+          data: { email: data.email, reason: 'COMPLAINED' },
+        });
+      }
     } else if (eventType === "email.opened") {
       await prisma.emailEvent.create({
         data: { campaignId: "camp-1", type: "OPEN", messageId: messageId || "unknown" },
